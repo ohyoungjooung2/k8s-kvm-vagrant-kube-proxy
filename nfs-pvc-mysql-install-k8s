@@ -461,9 +461,13 @@ With browser connect below link, will show wordpress install page.
 http://10.1.0.4:30254/wp-admin/install.php
 
 
+ssh tunneling for convenient connection to wordpress that is being run in kubernet pod..etc.
+[vagrant@kubemaster storage_test]$ ssh -L 9000:10.106.208.28:80 vagrant@10.1.0.2
+
+oyj@oyj-ThinkPad-E465:~/kuber$ ssh -L 9000:localhost:9000 vagrant@10.1.0.2
 
 
-
+http://localhost:9000 will suffice.
 
 
 
