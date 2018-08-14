@@ -1,0 +1,471 @@
+This doc explains how to install kubectl PersistentVolume and PersistentVolumeClaim using outer nfs server.
+We should prepare nfs node.(10.1.0.6 is my nfs server installed kvm env.
+I refered below link. That is very awesome github. Thank you.
+https://github.com/kubernetes-incubator/external-storage/blob/master/nfs-client/deploy/test-claim.yaml
+
+1.Nfs sERver install on centos7
+ - 10.1.0.6 is nfs server
+
+
+2. deployment. Create deployment.
+[vagrant@kubemaster storage_test]$ cat dep-for-mysql-stor.yml 
+
+kind: Deployment
+apiVersion: extensions/v1beta1
+#apiVersion: extensions/v1
+metadata:
+  name: nfs-client-provisioner-for-mysql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: nfs-client-provisioner
+    spec:
+      serviceAccountName: nfs-client-provisioner
+      containers:
+        - name: nfs-client-provisioner
+          image: quay.io/external_storage/nfs-client-provisioner:latest
+          volumeMounts:
+            - name: nfs-client-root
+              mountPath: /persistentvolumes
+          env:
+            - name: PROVISIONER_NAME
+              value: fuseim.pri/ifs
+            - name: NFS_SERVER
+              value: 10.1.0.6
+            - name: NFS_PATH
+              value: /nfsshare
+      volumes:
+        - name: nfs-client-root
+          nfs:
+            server: 10.1.0.6
+            path: /nfsshare
+
+
+
+[vagrant@kubemaster storage_test]$ kubectl get pods | grep mysql
+nfs-client-provisioner-for-mysql-867b88f4b4-fqxfg   1/1       Running     0          1m
+
+3. Create class.
+[vagrant@kubemaster storage_test]$ vi class-for-mysql.yml 
+[vagrant@kubemaster storage_test]$ cat class-for-mysql.yml 
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: managed-nfs-storage-for-mysql
+provisioner: fuseim.pri/ifs # or choose another name, must match deployment's env PROVISIONER_NAME'
+parameters:
+  archiveOnDelete: "false" # When set
+
+
+
+[vagrant@kubemaster storage_test]$ kubectl get storageclass | grep mysql
+managed-nfs-storage-for-mysql   fuseim.pri/ifs   8s
+
+
+4. Authorization. In my case I installed kubernets 11.1, by default RBAC is configured.
+So I need to configure authorization process.
+
+By default RBAC is on.
+[vagrant@kubemaster storage_test]$ ps -ef | grep RBAC
+root      2916  2884  6 14:00 ?        00:04:28 kube-apiserver --authorization-mode=Node,RBAC \ 
+--advertise-address=10.1.0.2 --allow-privileged=true 
+--client-ca-file=/etc/kubernetes/pki/ca.crt 
+--disable-admission-plugins=PersistentVolumeLabel 
+--enable-admission-plugins=NodeRestriction 
+--enable-bootstrap-token-auth=true
+--etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt 
+--etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt 
+--etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key
+ --etcd-servers=https://127.0.0.1:2379 --insecure-port=0
+ --kubelet-client-certificate=/etc/kubernetes/pki/apiserver-kubelet-client.crt --kubelet-client-key=/etc/kubernetes/pki/apiserver-kubelet-client.key --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname --proxy-client-cert-file=/etc/kubernetes/pki/front-proxy-client.crt --proxy-client-key-file=/etc/kubernetes/pki/front-proxy-client.key --requestheader-allowed-names=front-proxy-client --requestheader-client-ca-file=/etc/kubernetes/pki/front-proxy-ca.crt --requestheader-extra-headers-prefix=X-Remote-Extra- --requestheader-group-headers=X-Remote-Group --requestheader-username-headers=X-Remote-User --secure-port=6443 --service-account-key-file=/etc/kubernetes/pki/sa.pub --service-cluster-ip-range=10.96.0.0/12 --tls-cert-file=/etc/kubernetes/pki/apiserver.crt --tls-private-key-file=/etc/kubernetes/pki/apiserver.key
+
+
+Create authoriztion.
+[vagrant@kubemaster storage_test]$ cat sa-for-mysql.yml 
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nfs-client-provisioner-for-mysql
+
+[vagrant@kubemaster storage_test]$ cat ctr-for-mysql.yml 
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  #name: nfs-client-provisioner-runner
+  name: nfs-client-provisioner-for-mysql
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "watch", "list", "get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+
+[vagrant@kubemaster storage_test]$ cat ctrb-for-mysql.yml 
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: nfs-client-provisioner-for-mysql
+subjects:
+  - kind: ServiceAccount
+    name: nfs-client-provisioner-for-mysql
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: nfs-client-provisioner-for-mysql
+  apiGroup: rbac.authorization.k8s.io
+
+[vagrant@kubemaster storage_test]$ kubectl create -f sa-for-mysql.yml -f ctr-for-mysql.yml -f ctrb-for-mysql.yml 
+serviceaccount/nfs-client-provisioner-for-mysql created
+clusterrole.rbac.authorization.k8s.io/nfs-client-provisioner-for-mysql created
+clusterrolebinding.rbac.authorization.k8s.io/nfs-client-provisioner-for-mysql created
+
+
+[vagrant@kubemaster storage_test]$ kubectl get pod | grep mysql
+
+nfs-client-provisioner-for-mysql-867b88f4b4-fqxfg   1/1       Running   0          14m
+
+
+5.Storage claim(persistentVolumeClaim)
+[vagrant@kubemaster storage_test]$ cat mysql-stor-claim.yml 
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: stor-for-mysql-claim
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "managed-nfs-storage-for-mysql"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+
+
+[vagrant@kubemaster storage_test]$ kubectl get pvc | grep mysql
+stor-for-mysql-claim   Bound     pvc-feee1f07-9fd5-11e8-bf1b-525400cafc29   1Gi        RWX            managed-nfs-storage-for-mysql   12s
+
+!Congratulations! on us!No errors.
+
+[vagrant@kubemaster storage_test]$ kubectl logs nfs-client-provisioner-for-mysql-867b88f4b4-fqxfg
+I0814 15:03:22.666246       1 controller.go:615] Starting provisioner controller 2ff55e46-9fd3-11e8-b6ec-0a58ac100214!
+I0814 15:03:22.667420       1 controller.go:652] Started provisioner controller 2ff55e46-9fd3-11e8-b6ec-0a58ac100214!
+I0814 15:23:28.964246       1 leaderelection.go:156] attempting to acquire leader lease...
+I0814 15:23:28.988820       1 leaderelection.go:178] successfully acquired lease to provision for pvc default/stor-for-mysql-claim
+I0814 15:23:29.003371       1 event.go:221] Event(v1.ObjectReference{Kind:"PersistentVolumeClaim", Namespace:"default", Name:"stor-for-mysql-claim", UID:"feee1f07-9fd5-11e8-bf1b-525400cafc29", APIVersion:"v1", ResourceVersion:"80783", FieldPath:""}): type: 'Normal' reason: 'Provisioning' External provisioner is provisioning volume for claim "default/stor-for-mysql-claim"
+I0814 15:23:29.033084       1 controller.go:1079] volume "pvc-feee1f07-9fd5-11e8-bf1b-525400cafc29" for claim "default/stor-for-mysql-claim" created
+I0814 15:23:29.053854       1 controller.go:1096] volume "pvc-feee1f07-9fd5-11e8-bf1b-525400cafc29" for claim "default/stor-for-mysql-claim" saved
+I0814 15:23:29.053903       1 controller.go:1132] volume "pvc-feee1f07-9fd5-11e8-bf1b-525400cafc29" provisioned for claim "default/stor-for-mysql-claim"
+I0814 15:23:29.054820       1 event.go:221] Event(v1.ObjectReference{Kind:"PersistentVolumeClaim", Namespace:"default", Name:"stor-for-mysql-claim", UID:"feee1f07-9fd5-11e8-bf1b-525400cafc29", APIVersion:"v1", ResourceVersion:"80783", FieldPath:""}): type: 'Normal' reason: 'ProvisioningSucceeded' Successfully provisioned volume pvc-feee1f07-9fd5-11e8-bf1b-525400cafc29
+I0814 15:23:31.009005       1 leaderelection.go:198] stopped trying to renew lease to provision for pvc default/stor-for-mysql-claim, task succeeded
+
+
+Now like Linux volume manager, I claim some storage from external nfs server. Just for dev test, 1Gi.
+
+
+
+Now, I will use below link to setup wordpress+mysql on my kvm based vagrant k8s env(11.1)
+https://kubernetes.io/docs/tutorials/stateful-application/mysql-wordpress-persistent-volume/
+
+1) Create mysql password
+[vagrant@kubemaster storage_test]$ kubectl create secret generic mysql-pass --from-literal=password='enjoypass'
+secret/mysql-pass created
+
+[vagrant@kubemaster storage_test]$ kubectl get secrets | grep mysql-pass
+mysql-pass                                     Opaque                                1         54s
+
+
+
+[vagrant@kubemaster storage_test]$ kubectl describe secrets mysql-pass
+Name:         mysql-pass
+Namespace:    default
+Labels:       <none>
+Annotations:  <none>
+
+Type:  Opaque
+
+Data
+====
+password:  9 bytes
+
+
+2) Deploy mysql
+
+
+
+  name: wordpress-mysql
+  labels:
+    app: wordpress
+spec:
+  ports:
+    - port: 3306
+  selector:
+    app: wordpress
+    tier: mysql
+  clusterIP: None
+---
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: wordpress-mysql
+  labels:
+    app: wordpress
+spec:
+  selector:
+    matchLabels:
+      app: wordpress
+      tier: mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: wordpress
+        tier: mysql
+    spec:
+      containers:
+      - image: mysql:5.6
+        name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-pass
+              key: password
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: mysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: stor-for-mysql-claim
+
+[vagrant@kubemaster storage_test]$ kubectl create -f mysql-dep.yml 
+service/wordpress-mysql created
+deployment.apps/wordpress-mysql created
+
+Now running seems ok like belows.
+
+[vagrant@kubemaster storage_test]$ kubectl get pods | grep wordpress
+wordpress-mysql-5b768f7c5d-4975p                    0/1       ContainerCreating   0          1m
+[vagrant@kubemaster storage_test]$ kubectl get pods | grep wordpress
+wordpress-mysql-5b768f7c5d-4975p                    1/1       Running   0          1m
+
+Now it seems very ok like below.
+[vagrant@kubemaster storage_test]$ kubectl log wordpress-mysql-5b768f7c5d-4975p | tail -10
+log is DEPRECATED and will be removed in a future version. Use logs instead.
+2018-08-14 15:39:56 1 [Note] InnoDB: 5.6.41 started; log sequence number 1625997
+2018-08-14 15:39:56 1 [Note] Server hostname (bind-address): '*'; port: 3306
+2018-08-14 15:39:56 1 [Note] IPv6 is available.
+2018-08-14 15:39:56 1 [Note]   - '::' resolves to '::';
+2018-08-14 15:39:56 1 [Note] Server socket created on IP: '::'.
+2018-08-14 15:39:56 1 [Warning] Insecure configuration for --pid-file: Location '/var/run/mysqld' in the path is accessible to all OS users. Consider choosing a different directory.
+2018-08-14 15:39:56 1 [Warning] 'proxies_priv' entry '@ root@wordpress-mysql-5b768f7c5d-4975p' ignored in --skip-name-resolve mode.
+2018-08-14 15:39:56 1 [Note] Event Scheduler: Loaded 0 events
+2018-08-14 15:39:56 1 [Note] mysqld: ready for connections.
+Version: '5.6.41'  socket: '/var/run/mysqld/mysqld.sock'  port: 3306  MySQL Community Server (GPL)
+
+#Like below, We can see mysql wordpress docker ps in one of my kubectl nodes.
+
+vagrant@kubemaster storage_test]$ kubectl get no
+NAME          STATUS    ROLES     AGE       VERSION
+kubemaster    Ready     master    4d        v1.11.1
+kubeworker1   Ready     <none>    4d        v1.11.1
+kubeworker2   Ready     <none>    4d        v1.11.1
+
+
+[vagrant@kubeworker1 ~]$ sudo docker ps | grep mysql | grep word
+2ea2c3b09356        mysql@sha256:2e48836690b8416e4890c369aa174fc1f73c125363d94d99cfd08115f4513ec9                                             "docker-entrypoint..."   9 minutes ago       Up 9 minutes                            k8s_mysql_wordpress-mysql-5b768f7c5d-4975p_default_0b441ff6-9fd8-11e8-bf1b-525400cafc29_0
+a787d3615930        k8s.gcr.io/pause:3.1                                                                                                      "/pause"                 11 minutes ago      Up 11 minutes                           k8s_POD_wordpress-mysql-5b768f7c5d-4975p_default_0b441ff6-9fd8-11e8-bf1b-525400cafc29_0
+
+3) Deploy wordpress
+First, I should create PersistentVolumeClaim as follows.
+[vagrant@kubemaster storage_test]$ vi wordpress-stor-claim.yml 
+[vagrant@kubemaster storage_test]$ cat wordpress-stor-claim.yml 
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: stor-for-wordpress-claim
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "managed-nfs-storage-for-mysql"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+
+
+
+[vagrant@kubemaster storage_test]$ kubectl get pvc | grep word
+stor-for-wordpress-claim   Pending                                                                        managed-nfs-storage-for-mysql   11s
+[vagrant@kubemaster storage_test]$ kubectl get pvc | grep word
+stor-for-wordpress-claim   Bound     pvc-8339364e-9fda-11e8-bf1b-525400cafc29   1Gi        RWX            managed-nfs-storage-for-mysql   12s
+
+
+
+
+
+
+[vagrant@kubemaster storage_test]$ vi wordpress-dep.yml 
+
+[vagrant@kubemaster storage_test]$ cat wordpress-dep.yml 
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: wordpress
+    tier: frontend
+  type: LoadBalancer
+---
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  selector:
+    matchLabels:
+      app: wordpress
+      tier: frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: wordpress
+        tier: frontend
+    spec:
+      containers:
+      - image: wordpress:4.8-apache
+        name: wordpress
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: wordpress-mysql
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-pass
+              key: password
+        ports:
+        - containerPort: 80
+          name: wordpress
+        volumeMounts:
+        - name: wordpress-persistent-storage
+          mountPath: /var/www/html
+      volumes:
+      - name: wordpress-persistent-storage
+        persistentVolumeClaim:
+          claimName: stor-for-wordpress-claim
+
+[vagrant@kubemaster storage_test]$ 
+
+[vagrant@kubemaster storage_test]$ #now deploy!
+[vagrant@kubemaster storage_test]$ kubectl create -f wordpress-dep.yml 
+service/wordpress created
+deployment.apps/wordpress created
+[vagrant@kubemaster storage_test]$ kubectl get pods | grep wordpress
+wordpress-797d7fd654-snknd                          0/1       ContainerCreating   0          9s
+wordpress-mysql-5b768f7c5d-4975p                    1/1       Running             0          27m
+
+
+
+#Well it takes some time. 
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+Error from server (BadRequest): container "wordpress" in pod "wordpress-797d7fd654-776c5" is waiting to start: ContainerCreating
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+Error from server (BadRequest): container "wordpress" in pod "wordpress-797d7fd654-776c5" is waiting to start: ContainerCreating
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+Error from server (BadRequest): container "wordpress" in pod "wordpress-797d7fd654-776c5" is waiting to start: ContainerCreating
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+Error from server (BadRequest): container "wordpress" in pod "wordpress-797d7fd654-776c5" is waiting to start: ContainerCreating
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+Error from server (BadRequest): container "wordpress" in pod "wordpress-797d7fd654-776c5" is waiting to start: ContainerCreating
+[vagrant@kubemaster storage_test]$ 
+
+
+
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+[vagrant@kubemaster storage_test]$ kubectl logs wordpress-797d7fd654-776c5
+WordPress not found in /var/www/html - copying now...
+Complete! WordPress has been successfully copied to /var/www/html
+
+
+
+Node port is 30254 and cluster port is of course 80.
+
+[vagrant@kubemaster ~]$ kubectl get svc
+NAME              TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+kubernetes        ClusterIP      10.96.0.1       <none>        443/TCP        4d
+wordpress         LoadBalancer   10.106.208.28   <pending>     80:30254/TCP   20m
+wordpress-mysql   ClusterIP      None            <none>        3306/TCP       1h
+[vagrant@kubemaster ~]$ telnet 10.1.0.3 39254
+Trying 10.1.0.3...
+telnet: connect to address 10.1.0.3: Connection refused
+[vagrant@kubemaster ~]$ telnet 10.1.0.3 30254
+Trying 10.1.0.3...
+Connected to 10.1.0.3.
+Escape character is '^]'.
+^C^]
+telnet> quit
+Connection closed.
+[vagrant@kubemaster ~]$ telnet 10.1.0.4 30254
+Trying 10.1.0.4...
+Connected to 10.1.0.4.
+Escape character is '^]'.
+^]
+
+With browser connect below link, will show wordpress install page.
+
+http://10.1.0.4:30254/wp-admin/install.php
+
+
+
+
+
+
+
+
+
+
