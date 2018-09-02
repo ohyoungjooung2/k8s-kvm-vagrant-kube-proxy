@@ -1,8 +1,7 @@
 This doc explains how to install kubectl PersistentVolume and PersistentVolumeClaim using outer nfs server.
 We should prepare nfs node.(10.1.0.6 is my nfs server installed kvm env.
 I refered below link. That is very awesome github. Thank you.
-https://github.com/kubernetes-incubator/external-storage/blob/master/nfs-client/deploy/test-claim.yaml
-
+https://github.com/kubernetes-incubator/external-storage/blob/master/nfs-client/deploy/
 1.Nfs sERver install on centos7
  - 10.1.0.6 is nfs server
 
@@ -10,11 +9,17 @@ https://github.com/kubernetes-incubator/external-storage/blob/master/nfs-client/
 2. deployment. Create deployment.
 [vagrant@kubemaster storage_test]$ cat dep-for-mysql-stor.yml 
 
+
+[vagrant@kubemaster pvc]$ cat ext-nfs-pro.yml 
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nfs-client-provisioner
+---
 kind: Deployment
 apiVersion: extensions/v1beta1
-#apiVersion: extensions/v1
 metadata:
-  name: nfs-client-provisioner-for-mysql
+  name: nfs-client-provisioner
 spec:
   replicas: 1
   strategy:
@@ -37,36 +42,47 @@ spec:
             - name: NFS_SERVER
               value: 10.1.0.6
             - name: NFS_PATH
-              value: /nfsshare
+              value: /nfsroot
       volumes:
         - name: nfs-client-root
           nfs:
             server: 10.1.0.6
-            path: /nfsshare
+            path: /nfsroot
+
+
+[vagrant@kubemaster pvc]$ kubectl create -f ext-nfs-pro.yml 
+serviceaccount/nfs-client-provisioner created
+deployment.extensions/nfs-client-provisioner created
+[vagrant@kubemaster pvc]$ kubectl get pods
+NAME                                      READY     STATUS              RESTARTS   AGE
+nfs-client-provisioner-74bc458c8b-rqwqv   0/1       ContainerCreating   0          4s
+
+[vagrant@kubemaster pvc]$ kubectl get pods
+NAME                                      READY     STATUS    RESTARTS   AGE
+nfs-client-provisioner-74bc458c8b-rqwqv   1/1       Running   0          1m
 
 
 
-[vagrant@kubemaster storage_test]$ kubectl get pods | grep mysql
-nfs-client-provisioner-for-mysql-867b88f4b4-fqxfg   1/1       Running     0          1m
 
 3. Create class.
-[vagrant@kubemaster storage_test]$ vi class-for-mysql.yml 
-[vagrant@kubemaster storage_test]$ cat class-for-mysql.yml 
+[vagrant@kubemaster pvc]$ cat storageClass.yml 
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: managed-nfs-storage-for-mysql
+  name: managed-nfs-storage
 provisioner: fuseim.pri/ifs # or choose another name, must match deployment's env PROVISIONER_NAME'
 parameters:
   archiveOnDelete: "false" # When set
 
+[vagrant@kubemaster pvc]$ kubectl create -f storageClass.yml 
+storageclass.storage.k8s.io/managed-nfs-storage created
+
+[vagrant@kubemaster pvc]$ kubectl get storageClass | grep managed
+managed-nfs-storage         fuseim.pri/ifs      14s
 
 
-[vagrant@kubemaster storage_test]$ kubectl get storageclass | grep mysql
-managed-nfs-storage-for-mysql   fuseim.pri/ifs   8s
 
-
-4. Authorization. In my case I installed kubernets 11.1, by default RBAC is configured.
+4. Authorization. In my case I installed kubernets 1.11, by default RBAC is configured.
 So I need to configure authorization process.
 
 By default RBAC is on.
@@ -85,18 +101,13 @@ root      2916  2884  6 14:00 ?        00:04:28 kube-apiserver --authorization-m
 
 
 Create authoriztion.
-[vagrant@kubemaster storage_test]$ cat sa-for-mysql.yml 
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: nfs-client-provisioner-for-mysql
-
-[vagrant@kubemaster storage_test]$ cat ctr-for-mysql.yml 
+[vagrant@kubemaster pvc]$ vi clusterRoleAuth.yml
+[vagrant@kubemaster pvc]$ cat clusterRoleAuth.yml 
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1beta1
 metadata:
   #name: nfs-client-provisioner-runner
-  name: nfs-client-provisioner-for-mysql
+  name: nfs-client-provisioner
 rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
@@ -114,25 +125,31 @@ rules:
     resources: ["endpoints"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 
+[vagrant@kubemaster pvc]$ kubectl create -f clusterRoleAuth.yml 
+clusterrole.rbac.authorization.k8s.io/nfs-client-provisioner created
 
-[vagrant@kubemaster storage_test]$ cat ctrb-for-mysql.yml 
+[vagrant@kubemaster pvc]$ kubectl get clusterRole | grep nfs
+nfs-client-provisioner                                                 30s
+[vagrant@kubemaster pvc]$ 
+
+
+[vagrant@kubemaster pvc]$ vi clusterRoleBinding.yml 
+[vagrant@kubemaster pvc]$ cat clusterRoleBinding.yml 
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1beta1
 metadata:
-  name: nfs-client-provisioner-for-mysql
+  name: nfs-client-provisioner
 subjects:
   - kind: ServiceAccount
-    name: nfs-client-provisioner-for-mysql
+    name: nfs-client-provisioner
     namespace: default
 roleRef:
   kind: ClusterRole
-  name: nfs-client-provisioner-for-mysql
+  name: nfs-client-provisioner
   apiGroup: rbac.authorization.k8s.io
+[vagrant@kubemaster pvc]$ kubectl create -f clusterRoleBinding.yml 
+clusterrolebinding.rbac.authorization.k8s.io/nfs-client-provisioner created
 
-[vagrant@kubemaster storage_test]$ kubectl create -f sa-for-mysql.yml -f ctr-for-mysql.yml -f ctrb-for-mysql.yml 
-serviceaccount/nfs-client-provisioner-for-mysql created
-clusterrole.rbac.authorization.k8s.io/nfs-client-provisioner-for-mysql created
-clusterrolebinding.rbac.authorization.k8s.io/nfs-client-provisioner-for-mysql created
 
 
 [vagrant@kubemaster storage_test]$ kubectl get pod | grep mysql
