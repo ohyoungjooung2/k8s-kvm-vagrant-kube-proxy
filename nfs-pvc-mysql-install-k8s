@@ -7,8 +7,6 @@ https://github.com/kubernetes-incubator/external-storage/blob/master/nfs-client/
 
 
 2. deployment. Create deployment.
-[vagrant@kubemaster storage_test]$ cat dep-for-mysql-stor.yml 
-
 
 [vagrant@kubemaster pvc]$ cat ext-nfs-pro.yml 
 apiVersion: v1
